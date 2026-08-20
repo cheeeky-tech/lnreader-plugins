@@ -1,4 +1,5 @@
 import { Plugin } from '@/types/plugin';
+import { Filters } from '@libs/filterInputs';
 import { defaultCover } from '@libs/defaultCover';
 import { fetchApi } from '@libs/fetch';
 import { NovelStatus } from '@libs/novelStatus';
@@ -17,7 +18,11 @@ class HexNovels implements Plugin.PluginBase {
    * HexNovels не предоставляет нам известного публиного API.
    * Поэтому используем HTML сайта.
    */
-  async popularNovels(pageNo: number): Promise<Plugin.NovelItem[]> {
+  async popularNovels(
+  pageNo: number,
+  _options: Plugin.PopularNovelsOptions<Filters>,
+): Promise<Plugin.NovelItem[]> {
+
     const url =
       pageNo <= 1
         ? this.site
@@ -75,7 +80,11 @@ class HexNovels implements Plugin.PluginBase {
     return novels;
   }
 
-  async searchNovels(searchTerm: string): Promise<Plugin.NovelItem[]> {
+  async searchNovels(
+  searchTerm: string,
+  _pageNo: number,
+): Promise<Plugin.NovelItem[]> {
+
     /**
      * Основной вариант — каталог HexNovels.
      *
