@@ -3,145 +3,99 @@ import { Filters } from '@libs/filterInputs';
 import { defaultCover } from '@libs/defaultCover';
 import { fetchApi } from '@libs/fetch';
 import { NovelStatus } from '@libs/novelStatus';
-import { load as loadCheerio } from 'cheerio';
 
 const BASE_URL = 'https://hexnovels.me';
+const API_URL = 'https://api.hexnovels.me/v2';
+
+type HexBook = {
+  id: string;
+  slug: string;
+  poster?: string | null;
+  status?: string | null;
+  name?: {
+    ru?: string;
+    en?: string;
+    original?: string;
+  };
+};
+
+type ProseMirrorNode = {
+  type?: string;
+  text?: string;
+  attrs?: Record<string, unknown>;
+  content?: ProseMirrorNode[];
+  marks?: Array<{
+    type?: string;
+  }>;
+};
+
+type HexChapter = {
+  id: string;
+  number?: number;
+  volume?: number;
+  bookId?: string;
+  content?: {
+    type?: string;
+    content?: ProseMirrorNode[];
+  };
+};
 
 class HexNovels implements Plugin.PluginBase {
   id = 'HEXNOVELS';
   name = 'HexNovels';
   site = BASE_URL;
-  version = '1.0.0';
+  version = '2.0.0';
   icon = 'https://hexnovels.me/favicon.ico';
 
-  /**
-   * HexNovels не предоставляет нам известного пуиного API.
-   * Поэтому используем HTML сайта.
-   */
   async popularNovels(
-  pageNo: number,
-  _options: Plugin.PopularNovelsOptions<Filters>,
-): Promise<Plugin.NovelItem[]> {
-
-    const url =
-      pageNo <= 1
-        ? this.site
-        : `${this.site}/catalog?page=${pageNo}`;
-
-    const res = await fetchApi(url);
-
-    if (!res.ok) {
-      throw new Error(`HexNovels: HTTP ${res.status}`);
-    }
-
-    const html = await res.text();
-    const $ = loadCheerio(html);
-
-    const novels: Plugin.NovelItem[] = [];
-    const seen = new Set<string>();
-
-    /**
-     * Все страницы произведений имеют:
-     *
-     * /content/<slug>
-     *
-     * Исключаем ссылки на главы:
-     *
-     * /content/<slug>/<uuid>
-     */
-    $('a[href^="/content/"]').each((_, element) => {
-      const href = $(element).attr('href');
-
-      if (!href) return;
-
-      const path = href.replace(/^\/+/, '');
-
-      const parts = path.split('/');
-
-      if (parts.length !== 2) return;
-
-      if (!parts[0] || !parts[1]) return;
-
-      const name = $(element).text().replace(/\s+/g, ' ').trim();
-
-      if (!name) return;
-
-      if (seen.has(path)) return;
-
-      seen.add(path);
-
-      novels.push({
-        name,
-        path,
-        cover: defaultCover,
-      });
-    });
-
-    return novels;
+    _pageNo: number,
+    _options: Plugin.PopularNovelsOptions<Filters>,
+  ): Promise<Plugin.NovelItem[]> {
+    return [];
   }
 
   async searchNovels(
-  searchTerm: string,
-  _pageNo: number,
-): Promise<Plugin.NovelItem[]> {
-
-    /**
-     * Основной вариант — каталог HexNovels.
-     *
-     * Если текущая версия сайта изменит параметр поиска,
-     * достаточно будет изменить URL здесь.
-     */
+    searchTerm: string,
+    _pageNo: number,
+  ): Promise<Plugin.NovelItem[]> {
     const url =
-      `${this.site}/catalog?search=` +
-      encodeURIComponent(searchTerm);
+      `${API_URL}/books?` +
+      `search=${encodeURIComponent(searchTerm)}` +
+      `&ignoreUserScopedContentStatus=true` +
+      `&serviceName=hexnovels`;
 
-    const res = await fetchApi(url);
+    const res = await fetchApi(url, {
+      headers: {
+        Accept: 'application/json',
+      },
+    });
 
     if (!res.ok) {
       throw new Error(`HexNovels search: HTTP ${res.status}`);
     }
 
-    const html = await res.text();
-    const $ = loadCheerio(html);
+    const books = (await res.json()) as HexBook[];
 
-    const novels: Plugin.NovelItem[] = [];
-    const seen = new Set<string>();
+    if (!Array.isArray(books)) {
+      return [];
+    }
 
-    $('a[href^="/content/"]').each((_, element) => {
-      const href = $(element).attr('href');
-
-      if (!href) return;
-
-      const path = href.replace(/^\/+/, '');
-      const parts = path.split('/');
-
-      // Только страницы произведений, не страницы глав.
-      if (parts.length !== 2) return;
-
-      const name = $(element).text().replace(/\s+/g, ' ').trim();
-
-      if (!name || seen.has(path)) return;
-
-      seen.add(path);
-
-      novels.push({
-        name,
-        path,
-        cover: defaultCover,
-      });
-    });
-
-    return novels;
+    return books.map(book => ({
+      name:
+        book.name?.ru ||
+        book.name?.en ||
+        book.name?.original ||
+        book.slug,
+      path: book.slug,
+      cover: book.poster || defaultCover,
+    }));
   }
 
   async parseNovel(novelPath: string): Promise<Plugin.SourceNovel> {
-    const normalizedPath = novelPath
-      .replace(/^https?:\/\/hexnovels\.me\/?/i, '')
-      .replace(/^\/+/, '')
-      .split('?')[0];
+    const slug = getSlug(novelPath);
+    const book = await this.findBook(slug);
 
-    const url = `${this.site}/${normalizedPath}`;
-
+    const url = `${BASE_URL}/content/${slug}?tab=chapters`;
     const res = await fetchApi(url);
 
     if (!res.ok) {
@@ -149,421 +103,308 @@ class HexNovels implements Plugin.PluginBase {
     }
 
     const html = await res.text();
-    const $ = loadCheerio(html);
+    const chapters = extractChapters(html, slug);
 
-    /**
-     * Заголовок.
-     *
-     * На HexNovels:
-     * h1 = "Реинкарнация с Самой Сильной Системой (Новелла)"
-     */
     const name =
-      $('h1').first().text().replace(/\s+/g, ' ').trim() ||
-      normalizedPath.split('/').pop() ||
-      'Без названия';
+      book?.name?.ru ||
+      book?.name?.en ||
+      book?.name?.original ||
+      slug;
 
-    /**
-     * Обложка.
-     */
-    let cover = defaultCover;
-
-    const coverCandidates = [
-      'img[alt*="Постер"]',
-      'img[alt*="обложк"]',
-      'img[alt*="Image"]',
-      'img',
-    ];
-
-    for (const selector of coverCandidates) {
-      const src =
-        $(selector).first().attr('src') ||
-        $(selector).first().attr('data-src');
-
-      if (src) {
-        cover = absoluteUrl(src);
-        break;
-      }
-    }
-
-    /**
-     * Описание.
-     *
-     * На странице оно находится после "Описание".
-     * Берём контейнер вокруг соответствующего заголовка.
-     */
-    let summary = '';
-
-    $('h2, h3, h4, h5').each((_, element) => {
-      const heading = $(element)
-        .text()
-        .replace(/\s+/g, ' ')
-        .trim()
-        .toLowerCase();
-
-      if (heading !== 'описание') return;
-
-      const container = $(element).parent();
-
-      const text = container
-        .find('p')
-        .map((_, p) => $(p).text().trim())
-        .get()
-        .filter(Boolean)
-        .join('\n\n');
-
-      if (text) {
-        summary = text;
-      }
-    });
-
-    /**
-     * Если структура выше изменится, пробуем найти description
-     * по тексту страницы.
-     */
-    if (!summary) {
-      const description = $('[class*="description"]')
-        .first()
-        .text()
-        .replace(/\s+/g, ' ')
-        .trim();
-
-      if (description) {
-        summary = description;
-      }
-    }
-
-    /**
-     * Статус.
-     */
-    const pageText = $('body').text().replace(/\s+/g, ' ');
+    const cover = book?.poster || defaultCover;
 
     let status = NovelStatus.Unknown;
 
-    if (/Статус оригинала\s*Завершен/i.test(pageText)) {
+    if (book?.status === 'DONE') {
       status = NovelStatus.Completed;
-    } else if (/Статус оригинала\s*Онгоинг/i.test(pageText)) {
+    } else if (book?.status === 'ONGOING') {
       status = NovelStatus.Ongoing;
-    } else if (/Статус оригинала\s*Приостановлен/i.test(pageText)) {
-      status = NovelStatus.OnHiatus;
     }
 
-    /**
-     * Автор.
-     */
-    let author = '';
-
-    $('h2, h3, h4, h5').each((_, element) => {
-      const heading = $(element)
-        .text()
-        .replace(/\s+/g, ' ')
-        .trim()
-        .toLowerCase();
-
-      if (heading !== 'автор') return;
-
-      const value = $(element)
-        .next()
-        .text()
-        .replace(/\s+/g, ' ')
-        .trim();
-
-      if (value) {
-        author = value;
-      }
-    });
-
-    /**
-     * Главы.
-     *
-     * На HexNovels ссылки имеют:
-     *
-     * /content/<slug>/<uuid>
-     *
-     * UUID позволяет безопасно использовать URL главы
-     * как chapter.path.
-     */
-    const chapters: Plugin.ChapterItem[] = [];
-    const seenChapters = new Set<string>();
-
-    $('a[href^="/content/"]').each((_, element) => {
-      const href = $(element).attr('href');
-
-      if (!href) return;
-
-      const path = href.replace(/^\/+/, '').split('?')[0];
-      const parts = path.split('/');
-
-      if (parts.length !== 3) return;
-
-      if (parts[0] !== normalizedPath.split('/')[1]) return;
-
-      const chapterPath = path;
-
-      if (seenChapters.has(chapterPath)) return;
-
-      const chapterName = $(element)
-        .text()
-        .replace(/\s+/g, ' ')
-        .trim();
-
-      if (!chapterName) return;
-
-      seenChapters.add(chapterPath);
-
-      /**
-       * Пытаемся определить номер главы.
-       */
-      const match = chapterName.match(
-        /(?:глава|chapter)\s+(\d+(?:\.\d+)?)/i,
-      );
-
-      const chapterNumber = match
-        ? Number(match[1])
-        : chapters.length + 1;
-
-      chapters.push({
-        name: chapterName,
-        path: chapterPath,
-        releaseTime: null,
-        chapterNumber,
-      });
-    });
-
-    /**
-     * HexNovels сейчас отдаёт виртуализированный список глав.
-     * Если список оказался в обратном порядке, LNReader всё равно
-     * сможет читать главы по их реальным URL.
-     */
-    chapters.sort((a, b) => {
-      const aNumber =
-        typeof a.chapterNumber === 'number'
-          ? a.chapterNumber
-          : 0;
-
-      const bNumber =
-        typeof b.chapterNumber === 'number'
-          ? b.chapterNumber
-          : 0;
-
-      return aNumber - bNumber;
-    });
-
     return {
-      path: normalizedPath,
+      path: slug,
       name,
       cover,
-      summary,
-      author,
+      summary: '',
+      author: '',
       status,
       chapters,
     };
   }
 
   async parseChapter(chapterPath: string): Promise<string> {
-    const normalizedPath = chapterPath
-      .replace(/^https?:\/\/hexnovels\.me\/?/i, '')
-      .replace(/^\/+/, '')
-      .split('?')[0];
+    const chapterId = getChapterId(chapterPath);
+    const url = `${API_URL}/chapters/${chapterId}`;
 
-    const url = `${this.site}/${normalizedPath}`;
-
-    const res = await fetchApi(url);
+    const res = await fetchApi(url, {
+      headers: {
+        Accept: 'application/json',
+      },
+    });
 
     if (!res.ok) {
-      throw new Error(
-        `HexNovels chapter: HTTP ${res.status}`,
-      );
+      throw new Error(`HexNovels chapter: HTTP ${res.status}`);
     }
 
-    const html = await res.text();
-    const $ = loadCheerio(html);
+    const chapter = (await res.json()) as HexChapter;
 
-    /**
-     * Важно:
-     *
-     * Не берём весь body, потому что туда попадут:
-     * - меню;
-     * - реклама;
-     * - комментарии;
-     * - навигация;
-     * - footer.
-     *
-     * Сначала ищем контейнер по содержимому.
-     */
-
-    const title = $('h1').first();
-
-    let content = '';
-
-    /**
-     * Варианты селекторов на случай небольшого изменения
-     * HTML-разметки сайта.
-     */
-    const selectors = [
-      '[class*="chapter-content"]',
-      '[class*="chapter_content"]',
-      '[class*="ChapterContent"]',
-      '[class*="reader-content"]',
-      '[class*="reader_content"]',
-      '[class*="ReaderContent"]',
-      'article',
-    ];
-
-    for (const selector of selectors) {
-      const node = $(selector).first();
-
-      if (node.length) {
-        const htmlContent = node.html();
-
-        if (htmlContent && htmlContent.trim().length > 100) {
-          content = htmlContent;
-          break;
-        }
-      }
+    if (!chapter.content?.content) {
+      throw new Error('HexNovels: chapter content is empty');
     }
 
-    /**
-     * Если класс контейнера неизвестен, ищем родителя H1,
-     * содержащего основной текст главы.
-     */
-    if (!content && title.length) {
-      let node = title.parent();
+    return nodesToHtml(chapter.content.content);
+  }
 
-      for (let i = 0; i < 5 && node.length; i++) {
-        const textLength = node.text().trim().length;
+  private async findBook(
+    slug: string,
+  ): Promise<HexBook | null> {
+    const url =
+      `${API_URL}/books?` +
+      `search=${encodeURIComponent(slug)}` +
+      `&ignoreUserScopedContentStatus=true` +
+      `&serviceName=hexnovels`;
 
-        if (textLength > 500) {
-          content = node.html() || '';
-          break;
-        }
-
-        node = node.parent();
-      }
-    }
-
-    /**
-     * Последний fallback.
-     *
-     * На индексируемых страницах HexNovels текст главы находится
-     * непосредственно после заголовка главы.
-     */
-    if (!content && title.length) {
-      const parts: string[] = [];
-
-      let current = title.next();
-
-      while (current.length) {
-        const tag = current[0]?.tagName?.toLowerCase();
-
-        if (
-          tag === 'footer' ||
-          tag === 'nav' ||
-          tag === 'header'
-        ) {
-          break;
-        }
-
-        const text = current.text().trim();
-
-        if (text) {
-          parts.push(current.toString());
-        }
-
-        current = current.next();
-      }
-
-      content = parts.join('\n');
-    }
-
-    if (!content || content.replace(/<[^>]*>/g, '').trim().length < 50) {
-      throw new Error(
-        'HexNovels: не удалось найти текст главы',
-      );
-    }
-
-    /**
-     * Удаляем мусор.
-     */
-    const content$ = loadCheerio(
-      `<div id="lnreader-hex-content">${content}</div>`,
-    );
-
-    const root = content$('#lnreader-hex-content');
-
-    root.find(
-      [
-        'script',
-        'style',
-        'noscript',
-        'iframe',
-        'form',
-        'button',
-        '[class*="comment"]',
-        '[class*="Comment"]',
-        '[class*="advert"]',
-        '[class*="Advert"]',
-        '[class*="banner"]',
-        '[class*="Banner"]',
-      ].join(','),
-    ).remove();
-
-    /**
-     * Удаляем повторный заголовок главы, если он попал
-     * в контейнер с текстом.
-     */
-    root.find('h1').remove();
-
-    /**
-     * Преобразуем относительные ссылки/картинки в абсолютные.
-     */
-    root.find('img').each((_, element) => {
-      const src =
-        content$(element).attr('src') ||
-        content$(element).attr('data-src');
-
-      if (src) {
-        content$(element).attr(
-          'src',
-          absoluteUrl(src),
-        );
-      }
+    const res = await fetchApi(url, {
+      headers: {
+        Accept: 'application/json',
+      },
     });
 
-    root.find('a').each((_, element) => {
-      const href = content$(element).attr('href');
+    if (!res.ok) {
+      return null;
+    }
 
-      if (href) {
-        content$(element).attr(
-          'href',
-          absoluteUrl(href),
-        );
-      }
-    });
+    const books = (await res.json()) as HexBook[];
 
-    return root.html()?.trim() || '';
+    if (!Array.isArray(books)) {
+      return null;
+    }
+
+    return books.find(book => book.slug === slug) || null;
   }
 
   resolveUrl = (
     path: string,
-    isNovel?: boolean,
+    _isNovel?: boolean,
   ): string => {
-    const normalizedPath = path
+    const normalized = path
       .replace(/^https?:\/\/hexnovels\.me\/?/i, '')
       .replace(/^\/+/, '');
 
-    return `${this.site}/${normalizedPath}`;
+    return `${BASE_URL}/${normalized}`;
   };
+}
+
+function extractChapters(
+  html: string,
+  slug: string,
+): Plugin.ChapterItem[] {
+  const chapters: Plugin.ChapterItem[] = [];
+  const seen = new Set<string>();
+
+  const linkRegex =
+    /href=["']\/content\/([^/"']+)\/([^/"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+
+  let match: RegExpExecArray | null;
+
+  while ((match = linkRegex.exec(html)) !== null) {
+    const linkSlug = match[1];
+    const chapterId = match[2];
+    const rawName = match[3];
+
+    if (linkSlug !== slug || !chapterId || seen.has(chapterId)) {
+      continue;
+    }
+
+    const chapterName = rawName
+      .replace(/<[^>]*>/g, ' ')
+      .replace(/&nbsp;/gi, ' ')
+      .replace(/&amp;/gi, '&')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    if (!chapterName) {
+      continue;
+    }
+
+    const numberMatch = chapterName.match(
+      /(?:глава|chapter)\s+(\d+(?:\.\d+)?)/i,
+    );
+
+    const chapterNumber = numberMatch
+      ? Number(numberMatch[1])
+      : chapters.length + 1;
+
+    seen.add(chapterId);
+
+    chapters.push({
+      name: chapterName,
+      path: `${slug}/${chapterId}`,
+      releaseTime: null,
+      chapterNumber,
+    });
+  }
+
+  chapters.sort(
+    (a, b) =>
+      (a.chapterNumber ?? 0) -
+      (b.chapterNumber ?? 0),
+  );
+
+  return chapters;
+}
+
+function getSlug(path: string): string {
+  const normalized = path
+    .replace(/^https?:\/\/hexnovels\.me\/?/i, '')
+    .replace(/^\/+/, '')
+    .split('?')[0];
+
+  const parts = normalized.split('/');
+
+  if (parts[0] === 'content') {
+    return parts[1] || '';
+  }
+
+  return parts[0] || '';
+}
+
+function getChapterId(path: string): string {
+  const normalized = path
+    .replace(/^https?:\/\/hexnovels\.me\/?/i, '')
+    .replace(/^\/+/, '')
+    .split('?')[0];
+
+  const parts = normalized.split('/');
+
+  return parts[parts.length - 1];
+}
+
+function nodesToHtml(
+  nodes: ProseMirrorNode[],
+): string {
+  return nodes.map(nodeToHtml).join('');
+}
+
+function nodeToHtml(
+  node: ProseMirrorNode,
+): string {
+  const type = node.type || '';
+
+  if (type === 'text') {
+    return applyMarks(
+      escapeHtml(node.text || ''),
+      node.marks || [],
+    );
+  }
+
+  const children = node.content
+    ? nodesToHtml(node.content)
+    : '';
+
+  switch (type) {
+    case 'paragraph':
+      return `<p>${children}</p>`;
+
+    case 'heading': {
+      const level =
+        typeof node.attrs?.level === 'number'
+          ? Math.min(
+              Math.max(node.attrs.level, 1),
+              6,
+            )
+          : 2;
+
+      return `<h${level}>${children}</h${level}>`;
+    }
+
+    case 'blockquote':
+      return `<blockquote>${children}</blockquote>`;
+
+    case 'bulletList':
+      return `<ul>${children}</ul>`;
+
+    case 'orderedList':
+      return `<ol>${children}</ol>`;
+
+    case 'listItem':
+      return `<li>${children}</li>`;
+
+    case 'hardBreak':
+      return '<br>';
+
+    case 'horizontalRule':
+      return '<hr>';
+
+    case 'image': {
+      const src = node.attrs?.src;
+
+      if (typeof src !== 'string' || !src) {
+        return '';
+      }
+
+      return `<p><img src="${escapeAttribute(
+        absoluteUrl(src),
+      )}" /></p>`;
+    }
+
+    default:
+      return children;
+  }
+}
+
+function applyMarks(
+  text: string,
+  marks: Array<{ type?: string }>,
+): string {
+  let result = text;
+
+  for (const mark of marks) {
+    switch (mark.type) {
+      case 'bold':
+        result = `<strong>${result}</strong>`;
+        break;
+
+      case 'italic':
+        result = `<em>${result}</em>`;
+        break;
+
+      case 'underline':
+        result = `<u>${result}</u>`;
+        break;
+
+      case 'strike':
+        result = `<s>${result}</s>`;
+        break;
+    }
+  }
+
+  return result;
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function escapeAttribute(value: string): string {
+  return escapeHtml(value);
 }
 
 function absoluteUrl(url: string): string {
   if (
     url.startsWith('http://') ||
-    url.startsWith('https://') ||
-    url.startsWith('//')
+    url.startsWith('https://')
   ) {
-    return url.startsWith('//')
-      ? `https:${url}`
-      : url;
+    return url;
+  }
+
+  if (url.startsWith('//')) {
+    return `https:${url}`;
   }
 
   if (url.startsWith('/')) {
