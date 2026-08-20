@@ -232,7 +232,18 @@ class HexNovels implements Plugin.PluginBase {
     }
 
     const data =
-      (await res.json()) as HexChapter[];
+  (await res.json()) as HexChapter[];
+
+if (!Array.isArray(data)) {
+  throw new Error(
+    'HexNovels: chapters response is not an array',
+  );
+}
+
+throw new Error(
+  `HEX TEST: API returned ${data.length} chapters`,
+);
+
 
     if (!Array.isArray(data)) {
       throw new Error(
