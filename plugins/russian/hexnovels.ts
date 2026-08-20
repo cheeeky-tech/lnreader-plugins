@@ -31,9 +31,12 @@ type ProseMirrorNode = {
 
 type HexChapter = {
   id: string;
-  number?: number;
-  volume?: number;
+  name?: string | null;
+  title?: string | null;
+  number?: number | string;
+  volume?: number | string;
   bookId?: string;
+  branchId?: string;
   content?: {
     type?: string;
     content?: ProseMirrorNode[];
@@ -44,7 +47,7 @@ class HexNovels implements Plugin.PluginBase {
   id = 'HEXNOVELS';
   name = 'HexNovels';
   site = BASE_URL;
-  version = '2.0.0';
+  version = '2.1.0';
   icon = 'https://hexnovels.me/favicon.ico';
 
   async popularNovels(
@@ -91,33 +94,41 @@ class HexNovels implements Plugin.PluginBase {
     }));
   }
 
-  async parseNovel(novelPath: string): Promise<Plugin.SourceNovel> {
+  async parseNovel(
+    novelPath: string,
+  ): Promise<Plugin.SourceNovel> {
     const slug = getSlug(novelPath);
+
     const book = await this.findBook(slug);
 
-    const url = `${BASE_URL}/content/${slug}?tab=chapters`;
-    const res = await fetchApi(url);
-
-    if (!res.ok) {
-      throw new Error(`HexNovels novel: HTTP ${res.status}`);
+    if (!book) {
+      throw new Error(
+        `HexNovels: book not found: ${slug}`,
+      );
     }
 
-    const html = await res.text();
-    const chapters = extractChapters(html, slug);
+    const chapters =
+      await this.getChapters(book.id, slug);
+
+    if (!chapters.length) {
+      throw new Error(
+        `HexNovels: no chapters found for ${slug}`,
+      );
+    }
 
     const name =
-      book?.name?.ru ||
-      book?.name?.en ||
-      book?.name?.original ||
+      book.name?.ru ||
+      book.name?.en ||
+      book.name?.original ||
       slug;
 
-    const cover = book?.poster || defaultCover;
+    const cover = book.poster || defaultCover;
 
     let status = NovelStatus.Unknown;
 
-    if (book?.status === 'DONE') {
+    if (book.status === 'DONE') {
       status = NovelStatus.Completed;
-    } else if (book?.status === 'ONGOING') {
+    } else if (book.status === 'ONGOING') {
       status = NovelStatus.Ongoing;
     }
 
@@ -132,9 +143,13 @@ class HexNovels implements Plugin.PluginBase {
     };
   }
 
-  async parseChapter(chapterPath: string): Promise<string> {
+  async parseChapter(
+    chapterPath: string,
+  ): Promise<string> {
     const chapterId = getChapterId(chapterPath);
-    const url = `${API_URL}/chapters/${chapterId}`;
+
+    const url =
+      `${API_URL}/chapters/${chapterId}`;
 
     const res = await fetchApi(url, {
       headers: {
@@ -143,16 +158,23 @@ class HexNovels implements Plugin.PluginBase {
     });
 
     if (!res.ok) {
-      throw new Error(`HexNovels chapter: HTTP ${res.status}`);
+      throw new Error(
+        `HexNovels chapter: HTTP ${res.status}`,
+      );
     }
 
-    const chapter = (await res.json()) as HexChapter;
+    const chapter =
+      (await res.json()) as HexChapter;
 
     if (!chapter.content?.content) {
-      throw new Error('HexNovels: chapter content is empty');
+      throw new Error(
+        'HexNovels: chapter content is empty',
+      );
     }
 
-    return nodesToHtml(chapter.content.content);
+    return nodesToHtml(
+      chapter.content.content,
+    );
   }
 
   private async findBook(
@@ -174,13 +196,87 @@ class HexNovels implements Plugin.PluginBase {
       return null;
     }
 
-    const books = (await res.json()) as HexBook[];
+    const books =
+      (await res.json()) as HexBook[];
 
     if (!Array.isArray(books)) {
       return null;
     }
 
-    return books.find(book => book.slug === slug) || null;
+    return (
+      books.find(
+        book => book.slug === slug,
+      ) || null
+    );
+  }
+
+  private async getChapters(
+    bookId: string,
+    slug: string,
+  ): Promise<Plugin.ChapterItem[]> {
+    const url =
+      `${API_URL}/chapters?bookId=${encodeURIComponent(
+        bookId,
+      )}`;
+
+    const res = await fetchApi(url, {
+      headers: {
+        Accept: 'application/json',
+      },
+    });
+
+    if (!res.ok) {
+      throw new Error(
+        `HexNovels chapters: HTTP ${res.status}`,
+      );
+    }
+
+    const data =
+      (await res.json()) as HexChapter[];
+
+    if (!Array.isArray(data)) {
+      throw new Error(
+        'HexNovels: chapters response is not an array',
+      );
+    }
+
+    const chapters = data
+      .filter(chapter => {
+        return (
+          typeof chapter.id === 'string' &&
+          chapter.id.length > 0
+        );
+      })
+      .map((chapter, index) => {
+        const number = Number(
+          chapter.number,
+        );
+
+        const chapterNumber =
+          Number.isFinite(number) && number > 0
+            ? number
+            : index + 1;
+
+        const chapterName =
+          chapter.name?.trim() ||
+          chapter.title?.trim() ||
+          `Глава ${chapterNumber}`;
+
+        return {
+          name: chapterName,
+          path: `${slug}/${chapter.id}`,
+          releaseTime: null,
+          chapterNumber,
+        };
+      });
+
+    chapters.sort(
+      (a, b) =>
+        (a.chapterNumber ?? 0) -
+        (b.chapterNumber ?? 0),
+    );
+
+    return chapters;
   }
 
   resolveUrl = (
@@ -188,75 +284,24 @@ class HexNovels implements Plugin.PluginBase {
     _isNovel?: boolean,
   ): string => {
     const normalized = path
-      .replace(/^https?:\/\/hexnovels\.me\/?/i, '')
+      .replace(
+        /^https?:\/\/hexnovels\.me\/?/i,
+        '',
+      )
       .replace(/^\/+/, '');
 
     return `${BASE_URL}/${normalized}`;
   };
 }
 
-function extractChapters(
-  html: string,
-  slug: string,
-): Plugin.ChapterItem[] {
-  const chapters: Plugin.ChapterItem[] = [];
-  const seen = new Set<string>();
-
-  const linkRegex =
-    /href=["']\/content\/([^/"']+)\/([^/"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
-
-  let match: RegExpExecArray | null;
-
-  while ((match = linkRegex.exec(html)) !== null) {
-    const linkSlug = match[1];
-    const chapterId = match[2];
-    const rawName = match[3];
-
-    if (linkSlug !== slug || !chapterId || seen.has(chapterId)) {
-      continue;
-    }
-
-    const chapterName = rawName
-      .replace(/<[^>]*>/g, ' ')
-      .replace(/&nbsp;/gi, ' ')
-      .replace(/&amp;/gi, '&')
-      .replace(/\s+/g, ' ')
-      .trim();
-
-    if (!chapterName) {
-      continue;
-    }
-
-    const numberMatch = chapterName.match(
-      /(?:глава|chapter)\s+(\d+(?:\.\d+)?)/i,
-    );
-
-    const chapterNumber = numberMatch
-      ? Number(numberMatch[1])
-      : chapters.length + 1;
-
-    seen.add(chapterId);
-
-    chapters.push({
-      name: chapterName,
-      path: `${slug}/${chapterId}`,
-      releaseTime: null,
-      chapterNumber,
-    });
-  }
-
-  chapters.sort(
-    (a, b) =>
-      (a.chapterNumber ?? 0) -
-      (b.chapterNumber ?? 0),
-  );
-
-  return chapters;
-}
-
-function getSlug(path: string): string {
+function getSlug(
+  path: string,
+): string {
   const normalized = path
-    .replace(/^https?:\/\/hexnovels\.me\/?/i, '')
+    .replace(
+      /^https?:\/\/hexnovels\.me\/?/i,
+      '',
+    )
     .replace(/^\/+/, '')
     .split('?')[0];
 
@@ -269,9 +314,14 @@ function getSlug(path: string): string {
   return parts[0] || '';
 }
 
-function getChapterId(path: string): string {
+function getChapterId(
+  path: string,
+): string {
   const normalized = path
-    .replace(/^https?:\/\/hexnovels\.me\/?/i, '')
+    .replace(
+      /^https?:\/\/hexnovels\.me\/?/i,
+      '',
+    )
     .replace(/^\/+/, '')
     .split('?')[0];
 
@@ -283,7 +333,9 @@ function getChapterId(path: string): string {
 function nodesToHtml(
   nodes: ProseMirrorNode[],
 ): string {
-  return nodes.map(nodeToHtml).join('');
+  return nodes
+    .map(nodeToHtml)
+    .join('');
 }
 
 function nodeToHtml(
@@ -310,7 +362,10 @@ function nodeToHtml(
       const level =
         typeof node.attrs?.level === 'number'
           ? Math.min(
-              Math.max(node.attrs.level, 1),
+              Math.max(
+                node.attrs.level,
+                1,
+              ),
               6,
             )
           : 2;
@@ -339,13 +394,19 @@ function nodeToHtml(
     case 'image': {
       const src = node.attrs?.src;
 
-      if (typeof src !== 'string' || !src) {
+      if (
+        typeof src !== 'string' ||
+        !src
+      ) {
         return '';
       }
 
-      return `<p><img src="${escapeAttribute(
-        absoluteUrl(src),
-      )}" /></p>`;
+      return (
+        `<p><img src="` +
+        `${escapeAttribute(
+          absoluteUrl(src),
+        )}" /></p>`
+      );
     }
 
     default:
@@ -382,20 +443,38 @@ function applyMarks(
   return result;
 }
 
-function escapeHtml(value: string): string {
+function escapeHtml(
+  value: string,
+): string {
   return value
     .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
+    .replace(
+      /</g,
+      '&lt;',
+    )
+    .replace(
+      />/g,
+      '&gt;',
+    )
+    .replace(
+      /"/g,
+      '&quot;',
+    )
+    .replace(
+      /'/g,
+      '&#39;',
+    );
 }
 
-function escapeAttribute(value: string): string {
+function escapeAttribute(
+  value: string,
+): string {
   return escapeHtml(value);
 }
 
-function absoluteUrl(url: string): string {
+function absoluteUrl(
+  url: string,
+): string {
   if (
     url.startsWith('http://') ||
     url.startsWith('https://')
