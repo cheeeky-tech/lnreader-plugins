@@ -14,7 +14,7 @@ class HexNovels implements Plugin.PluginBase {
   icon = 'https://hexnovels.me/favicon.ico';
 
   /**
-   * HexNovels не предоставляет нам известного публичного API.
+   * HexNovels не предоставляет нам известного публиного API.
    * Поэтому используем HTML сайта.
    */
   async popularNovels(pageNo: number): Promise<Plugin.NovelItem[]> {
