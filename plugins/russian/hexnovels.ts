@@ -286,6 +286,10 @@ throw new Error(
         (a.chapterNumber ?? 0) -
         (b.chapterNumber ?? 0),
     );
+    throw new Error(
+      `HEX TEST: converted to ${chapters.length} chapters`,
+    );
+
 
     return chapters;
   }
